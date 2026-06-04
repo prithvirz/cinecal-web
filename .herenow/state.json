@@ -1,0 +1,19 @@
+{
+  "publishes": {
+    "jazzy-finch-zec3": {
+      "siteUrl": "https://jazzy-finch-zec3.here.now/"
+    },
+    "rustic-prana-xmpy": {
+      "siteUrl": "https://rustic-prana-xmpy.here.now/",
+      "claimToken": "ea0ff1de48ef3e2fe1592e72745c996413b68b08ab01586bf80b73eaa0cd46af",
+      "claimUrl": "https://here.now/claim?slug=rustic-prana-xmpy&token=ea0ff1de48ef3e2fe1592e72745c996413b68b08ab01586bf80b73eaa0cd46af",
+      "expiresAt": "2026-05-29T04:17:52.217Z"
+    },
+    "cerulean-knoll-9awz": {
+      "siteUrl": "https://cerulean-knoll-9awz.here.now/",
+      "claimToken": "5f6ac97b9448da6ace018f50dac89cc8b7486a4dbb924857317c5ed31be03714",
+      "claimUrl": "https://here.now/claim?slug=cerulean-knoll-9awz&token=5f6ac97b9448da6ace018f50dac89cc8b7486a4dbb924857317c5ed31be03714",
+      "expiresAt": "2026-06-04T22:07:45.835Z"
+    }
+  }
+}
