@@ -16,6 +16,8 @@ LANG_GROUPS = {
 
 INDIAN_LANGUAGES = ["hi", "te", "ta", "ml", "kn", "pa", "bn", "mr"]
 
+GENRE_MAP = {}
+
 def get_ist_date():
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist).date()
@@ -52,9 +54,7 @@ def calculate_next_friday(current_date):
     days_ahead = (4 - current_date.weekday()) % 7
     if days_ahead == 0:
         days_ahead = 7
-    next_friday = current_date + timedelta(days=days_ahead)
-    assert next_friday.weekday() == 4, f"Calculated date {next_friday} is not a Friday!"
-    return next_friday
+    return current_date + timedelta(days=days_ahead)
 
 def tmdb_request(endpoint, params, api_key):
     request_params = params.copy()
@@ -65,7 +65,7 @@ def tmdb_request(endpoint, params, api_key):
     req = urllib.request.Request(url)
     if not is_v3_key:
         req.add_header("Authorization", f"Bearer {api_key}")
-        req.add_header("Accept", "application/json")
+    req.add_header("Accept", "application/json")
     try:
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode('utf-8'))
@@ -73,22 +73,54 @@ def tmdb_request(endpoint, params, api_key):
         print(f"API Error ({endpoint}): {e}", file=sys.stderr)
         return {"results": []}
 
+def fetch_genre_map(api_key):
+    global GENRE_MAP
+    data = tmdb_request("genre/movie/list", {"language": "en-US"}, api_key)
+    for g in data.get("genres", []):
+        GENRE_MAP[g["id"]] = g["name"]
+    tv_data = tmdb_request("genre/tv/list", {"language": "en-US"}, api_key)
+    for g in tv_data.get("genres", []):
+        GENRE_MAP[g["id"]] = g["name"]
+
+def get_genre_names(genre_ids):
+    return [GENRE_MAP.get(gid, "") for gid in (genre_ids or []) if GENRE_MAP.get(gid)]
+
 def get_language_group(lang_code):
     for group, langs in LANG_GROUPS.items():
         if lang_code in langs:
             return group
-    return "International & Other"
+    return "International"
+
+def poster_url(path, size="w342"):
+    if path:
+        return f"https://image.tmdb.org/t/p/{size}{path}"
+    return ""
+
+def star_rating(vote):
+    if not vote:
+        return "NR"
+    stars = round(vote / 2)
+    return "⭐" * stars + f" {vote:.1f}/10"
+
+def popularity_tier(pop):
+    if not pop:
+        return ""
+    if pop >= 100:
+        return "🔥"
+    if pop >= 50:
+        return "📈"
+    return ""
 
 def send_telegram_message(bot_token, chat_id, text_message):
     if not bot_token or not chat_id:
-        print("Telegram Bot Token or Chat ID missing. Skipping Telegram notification.")
+        print("Telegram Bot Token or Chat ID missing. Skipping.")
         return
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({
         "chat_id": chat_id,
         "text": text_message,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True
     }).encode('utf-8')
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
@@ -97,53 +129,238 @@ def send_telegram_message(bot_token, chat_id, text_message):
     except Exception as e:
         print(f"Failed to send Telegram message: {e}", file=sys.stderr)
 
+def send_telegram_photo(bot_token, chat_id, photo_url, caption):
+    if not bot_token or not chat_id or not photo_url:
+        return False
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": caption,
+        "parse_mode": "Markdown"
+    }).encode('utf-8')
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return True
+    except Exception as e:
+        print(f"Failed to send photo: {e}", file=sys.stderr)
+        return False
+
+def format_movie_line(m, include_poster=False):
+    title = m.get("title") or m.get("name") or "Unknown"
+    orig = m.get("original_title") or m.get("original_name") or ""
+    rating = star_rating(m.get("vote_average"))
+    pop_tier = popularity_tier(m.get("popularity"))
+    genres = ", ".join(get_genre_names(m.get("genre_ids", [])))
+    lang = (m.get("original_language") or "").upper()
+    line = f"• *{title}* {pop_tier}"
+    if orig and orig != title:
+        line += f" ({orig})"
+    line += f"\n  {rating}"
+    if genres:
+        line += f" | {genres}"
+    if lang:
+        line += f" | [{lang}]"
+    if include_poster:
+        purl = poster_url(m.get("poster_path"), "w185")
+        if purl:
+            line += f"\n  🖼 [Poster]({purl})"
+    if m.get("overview"):
+        snippet = m["overview"][:120].replace("\n", " ").strip()
+        if len(m["overview"]) > 120:
+            snippet += "…"
+        line += f"\n  _{snippet}_"
+    return line
+
+def format_tv_line(t):
+    title = t.get("name") or "Unknown"
+    orig = t.get("original_name") or ""
+    rating = star_rating(t.get("vote_average"))
+    pop_tier = popularity_tier(t.get("popularity"))
+    genres = ", ".join(get_genre_names(t.get("genre_ids", [])))
+    lang = (t.get("original_language") or "").upper()
+    seasons = t.get("number_of_seasons", "?")
+    episodes = t.get("number_of_episodes", "?")
+    line = f"• *{title}* {pop_tier}"
+    if orig and orig != title:
+        line += f" ({orig})"
+    line += f"\n  {rating}"
+    if genres:
+        line += f" | {genres}"
+    if lang:
+        line += f" | [{lang}]"
+    line += f" | S{seasons}×{episodes}"
+    purl = poster_url(t.get("poster_path"), "w185")
+    if purl:
+        line += f"\n  🖼 [Poster]({purl})"
+    if t.get("overview"):
+        snippet = t["overview"][:120].replace("\n", " ").strip()
+        if len(t["overview"]) > 120:
+            snippet += "…"
+        line += f"\n  _{snippet}_"
+    return line
+
+def build_tldr(movies, tv_shows, market, fallback):
+    parts = []
+    total = len(movies) + len(tv_shows) + len(market) + len(fallback)
+    if total == 0:
+        return "📭 *No releases today. Quiet day at the cinema.*"
+    if movies:
+        lang_counts = {}
+        for m in movies:
+            grp = get_language_group(m.get("original_language"))
+            lang_counts[grp] = lang_counts.get(grp, 0) + 1
+        counts_str = ", ".join(f"{v} {k}" for k, v in lang_counts.items())
+        parts.append(f"🎬 {len(movies)} theatrical ({counts_str})")
+    if tv_shows:
+        parts.append(f"📺 {len(tv_shows)} OTT drops")
+    if market:
+        top_market = sorted(market, key=lambda x: x.get("popularity", 0), reverse=True)[:3]
+        names = ", ".join(m.get("title", "") for m in top_market)
+        parts.append(f"🌍 {len(market)} intl ({names})")
+    if fallback:
+        parts.append(f"📅 Friday preview: {len(fallback)} upcoming")
+    return " | ".join(parts)
+
+def build_formatted_briefing(payload):
+    date_str = payload["date"]
+    movies = payload["indian_theatrical_movies"]
+    tv_shows = payload["indian_tv_shows"]
+    market = payload["non_indian_market_context"]
+    fallback = payload["friday_fallback_movies"]
+    fallback_date = payload.get("friday_fallback_date")
+
+    lines = [f"🍿 *CineCal — {date_str}*\n"]
+
+    # TL;DR
+    lines.append(build_tldr(movies, tv_shows, market, fallback))
+    lines.append("")
+
+    # Indian theatrical
+    lines.append("🎬 *Indian Theatrical Releases*")
+    if movies:
+        by_group = {}
+        for m in movies:
+            grp = get_language_group(m.get("original_language"))
+            by_group.setdefault(grp, []).append(m)
+        for grp, items in sorted(by_group.items()):
+            lines.append(f"\n📌 *{grp}* ({len(items)})")
+            for m in items:
+                lines.append(format_movie_line(m))
+    else:
+        lines.append("_No Indian theatrical releases today._")
+
+    # OTT
+    lines.append("\n📺 *OTT & Streaming*")
+    if tv_shows:
+        for t in tv_shows:
+            lines.append(format_tv_line(t))
+    else:
+        lines.append("_No Indian OTT/streaming releases today._")
+
+    # International — filtered: min popularity 30 or vote_count >= 10
+    filtered_market = [m for m in market if (m.get("popularity", 0) or 0) >= 30 or (m.get("vote_count", 0) or 0) >= 10]
+    lines.append(f"\n🌐 *International Releases in India* ({len(filtered_market)} of {len(market)} shown)")
+    if filtered_market:
+        filtered_market.sort(key=lambda x: x.get("popularity", 0) or 0, reverse=True)
+        for m in filtered_market[:8]:
+            lines.append(format_movie_line(m))
+        if len(filtered_market) > 8:
+            lines.append(f"  _…and {len(filtered_market) - 8} more_")
+    else:
+        lines.append("_No significant international releases._")
+
+    # Friday preview
+    if fallback_date:
+        lines.append(f"\n📅 *Friday {fallback_date} Preview*")
+        if fallback:
+            by_group = {}
+            for m in fallback:
+                grp = get_language_group(m.get("original_language"))
+                by_group.setdefault(grp, []).append(m)
+            total_fri = len(fallback)
+            counts = ", ".join(f"{v} {k}" for k, v in sorted(by_group.items()))
+            lines.append(f"_{total_fri} releases: {counts}_\n")
+            for grp, items in sorted(by_group.items()):
+                for m in items:
+                    title = m.get("title") or m.get("name") or "Unknown"
+                    rating = star_rating(m.get("vote_average"))
+                    pop_tier = popularity_tier(m.get("popularity"))
+                    lines.append(f"• *{title}* {pop_tier} ({grp}) {rating}")
+        else:
+            lines.append("_No Friday releases confirmed yet._")
+
+    lines.append(f"\n🔗 [TMDB](https://www.themoviedb.org/movie) | Generated {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M IST')}")
+    return "\n".join(lines)
+
 def run_pipeline():
     today_date = get_ist_date()
     str_date = today_date.strftime('%Y-%m-%d')
     output_dir = os.path.expanduser(f"~/cinecal_outputs/{str_date}")
     os.makedirs(output_dir, exist_ok=True)
+
     api_key = extract_tmdb_key()
     bot_token, chat_id = extract_telegram_config()
+
+    if api_key:
+        fetch_genre_map(api_key)
+
     lang_str = "|".join(INDIAN_LANGUAGES)
     exact_movies = []
     exact_tv = []
     exact_market = []
     fallback_data = []
     fallback_date_str = None
+
     if api_key:
+        # Indian theatrical — wider window: today ± 1 day
+        prev_date = (today_date - timedelta(days=1)).strftime('%Y-%m-%d')
+        next_date = (today_date + timedelta(days=1)).strftime('%Y-%m-%d')
         m_res = tmdb_request("discover/movie", {
             "region": "IN",
             "with_original_language": lang_str,
-            "primary_release_date.gte": str_date,
-            "primary_release_date.lte": str_date,
-            "sort_by": "popularity.desc"
+            "primary_release_date.gte": prev_date,
+            "primary_release_date.lte": next_date,
+            "sort_by": "popularity.desc",
+            "vote_count.gte": 5
         }, api_key)
         exact_movies = [m for m in m_res.get("results", []) if m.get("release_date") == str_date]
+
+        # Indian OTT — wider window
         t_res = tmdb_request("discover/tv", {
             "with_original_language": lang_str,
-            "first_air_date.gte": str_date,
-            "first_air_date.lte": str_date,
-            "sort_by": "popularity.desc"
+            "first_air_date.gte": prev_date,
+            "first_air_date.lte": next_date,
+            "sort_by": "popularity.desc",
+            "vote_count.gte": 3
         }, api_key)
         exact_tv = [t for t in t_res.get("results", []) if t.get("first_air_date") == str_date and "IN" in t.get("origin_country", [])]
+
+        # International in India — filter harder
         market_res = tmdb_request("discover/movie", {
             "region": "IN",
-            "primary_release_date.gte": str_date,
-            "primary_release_date.lte": str_date,
-            "sort_by": "popularity.desc"
+            "primary_release_date.gte": prev_date,
+            "primary_release_date.lte": next_date,
+            "sort_by": "popularity.desc",
+            "vote_count.gte": 15
         }, api_key)
         exact_market = [m for m in market_res.get("results", []) if m.get("release_date") == str_date and m.get("original_language") not in INDIAN_LANGUAGES]
-    if len(exact_movies) <= 1:
-        next_fri = calculate_next_friday(today_date)
-        fallback_date_str = next_fri.strftime('%Y-%m-%d')
-        fri_res = tmdb_request("discover/movie", {
-            "region": "IN",
-            "with_original_language": lang_str,
-            "primary_release_date.gte": fallback_date_str,
-            "primary_release_date.lte": fallback_date_str,
-            "sort_by": "popularity.desc"
-        }, api_key)
-        fallback_data = [m for m in fri_res.get("results", []) if m.get("release_date") == fallback_date_str]
+
+        # Friday fallback — only if today is thin
+        if len(exact_movies) <= 1:
+            next_fri = calculate_next_friday(today_date)
+            fallback_date_str = next_fri.strftime('%Y-%m-%d')
+            fri_res = tmdb_request("discover/movie", {
+                "region": "IN",
+                "with_original_language": lang_str,
+                "primary_release_date.gte": fallback_date_str,
+                "primary_release_date.lte": fallback_date_str,
+                "sort_by": "popularity.desc",
+                "vote_count.gte": 3
+            }, api_key)
+            fallback_data = [m for m in fri_res.get("results", []) if m.get("release_date") == fallback_date_str]
+
     payload = {
         "date": str_date,
         "indian_theatrical_movies": exact_movies,
@@ -152,8 +369,11 @@ def run_pipeline():
         "friday_fallback_date": fallback_date_str,
         "friday_fallback_movies": fallback_data
     }
+
+    # Save artifacts
     with open(os.path.join(output_dir, "cinecal_releases.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
     csv_rows = []
     for m in exact_movies:
         csv_rows.append({
@@ -164,7 +384,9 @@ def run_pipeline():
             "Platform": "Theatrical",
             "Language Group": get_language_group(m.get("original_language")),
             "Rating": m.get("vote_average", 0.0),
-            "Poster": f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get("poster_path") else "",
+            "Genres": ", ".join(get_genre_names(m.get("genre_ids", []))),
+            "Popularity": m.get("popularity", 0),
+            "Poster": poster_url(m.get("poster_path")),
             "Overview": m.get("overview", "").replace("\n", " ")
         })
     for t in exact_tv:
@@ -176,76 +398,42 @@ def run_pipeline():
             "Platform": "OTT / Streaming",
             "Language Group": get_language_group(t.get("original_language")),
             "Rating": t.get("vote_average", 0.0),
-            "Poster": f"https://image.tmdb.org/t/p/w500{t.get('poster_path')}" if t.get("poster_path") else "",
+            "Genres": ", ".join(get_genre_names(t.get("genre_ids", []))),
+            "Popularity": t.get("popularity", 0),
+            "Poster": poster_url(t.get("poster_path")),
             "Overview": t.get("overview", "").replace("\n", " ")
         })
-    with open(os.path.join(output_dir, "cinecal_releases.csv"), "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["Title", "Original Title", "Release Date", "Type", "Platform", "Language Group", "Rating", "Poster", "Overview"])
-        writer.writeheader()
-        writer.writerows(csv_rows)
+
+    if csv_rows:
+        with open(os.path.join(output_dir, "cinecal_releases.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["Title", "Original Title", "Release Date", "Type", "Platform", "Language Group", "Rating", "Genres", "Popularity", "Poster", "Overview"])
+            writer.writeheader()
+            writer.writerows(csv_rows)
+
     md_content = build_formatted_briefing(payload)
     with open(os.path.join(output_dir, "cinecal_briefing.md"), "w", encoding="utf-8") as f:
         f.write(md_content)
+
     total_items = len(exact_movies) + len(exact_tv) + len(exact_market) + len(fallback_data)
     if total_items > 0:
         print("[DECISION] BRIEFING")
         if bot_token and chat_id:
             send_telegram_message(bot_token, chat_id, md_content)
-        else:
-            print("[SILENT]")
-
-def build_formatted_briefing(payload):
-    date_str = payload["date"]
-    lines = [f"🍿 *CineCal Daily Briefing — {date_str}*\n"]
-    lines.append("🎬 *Indian-Language Theatrical Releases*")
-    theatricals = payload["indian_theatrical_movies"]
-    if theatricals:
-        by_group = {}
-        for m in theatricals:
-            grp = get_language_group(m.get("original_language"))
-            by_group.setdefault(grp, []).append(m)
-        for grp, items in by_group.items():
-            lines.append(f"\n📌 *{grp}*")
-            for m in items:
-                title = m.get("title")
-                rating = f"⭐ {m.get('vote_average'):.1f}/10" if m.get('vote_average') else ""
-                poster = f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get('poster_path') else ""
-                lines.append(f"• *{title}* {rating}")
-                if poster:
-                    lines.append(f" 🖼 [Poster Image]({poster})")
-                if m.get("overview"):
-                    lines.append(f" _{m.get('overview')[:150]}..._")
+            # Send top poster as photo for visual punch
+            top_poster = None
+            for src in [exact_movies, fallback_data]:
+                for m in src:
+                    if m.get("poster_path"):
+                        top_poster = m
+                        break
+                if top_poster:
+                    break
+            if top_poster:
+                purl = poster_url(top_poster.get("poster_path"), "w500")
+                cap = f"🍿 {top_poster.get('title') or top_poster.get('name', '')}"
+                send_telegram_photo(bot_token, chat_id, purl, cap)
     else:
-        lines.append("_No Indian theatrical releases today._")
-    lines.append("\n📺 *Indian OTT & Streaming Drops*")
-    tv_items = payload["indian_tv_shows"]
-    if tv_items:
-        for t in tv_items:
-            title = t.get("name")
-            lang = t.get("original_language", "").upper()
-            rating = f"⭐ {t.get('vote_average'):.1f}/10" if t.get('vote_average') else ""
-            lines.append(f"• *{title}* [{lang}] {rating}")
-            if t.get("poster_path"):
-                lines.append(f" 🖼 [Poster Image](https://image.tmdb.org/t/p/w500{t.get('poster_path')})")
-    else:
-        lines.append("_No Indian OTT/streaming releases today._")
-    lines.append("\n🌐 *International Market Context (India Release)*")
-    market_items = payload["non_indian_market_context"]
-    if market_items:
-        for m in market_items:
-            lines.append(f"• *{m.get('title')}* [{m.get('original_language', '').upper()}]")
-    else:
-        lines.append("_No major international theatrical releases in India today._")
-    if payload.get("friday_fallback_date"):
-        lines.append(f"\n📅 *Upcoming Friday Preview ({payload['friday_fallback_date']})*")
-        fallback_m = payload["friday_fallback_movies"]
-        if fallback_m:
-            for m in fallback_m:
-                grp = get_language_group(m.get('original_language'))
-                lines.append(f"• *{m.get('title')}* ({grp})")
-        else:
-            lines.append("_No upcoming Friday theatrical releases recorded yet._")
-    return "\n".join(lines)
+        print("[SILENT]")
 
 if __name__ == "__main__":
     run_pipeline()
