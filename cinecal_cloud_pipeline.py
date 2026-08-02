@@ -412,18 +412,15 @@ def run_pipeline():
         print("[DECISION] BRIEFING")
         if bot_token and chat_id:
             send_telegram_message(bot_token, chat_id, md_content)
-            # Send top poster
-            top_poster = None
-            for src in [exact_movies, fallback_data]:
-                for m in src:
-                    if m.get("poster_path"):
-                        top_poster = m
-                        break
-                if top_poster:
-                    break
-            if top_poster:
-                purl = poster_url(top_poster.get("poster_path"), "w500")
-                cap = f"🍿 {top_poster.get('title') or top_poster.get('name', '')}"
+            # Send top 5 posters as photos
+            all_candidates = sorted(
+                [m for m in exact_movies + fallback_data if m.get("poster_path")],
+                key=lambda x: x.get("popularity", 0) or 0,
+                reverse=True
+            )
+            for m in all_candidates[:5]:
+                purl = poster_url(m.get("poster_path"), "w500")
+                cap = f"🍿 {m.get('title') or m.get('name', '')}"
                 send_telegram_photo(bot_token, chat_id, purl, cap)
     else:
         print("[SILENT]")
