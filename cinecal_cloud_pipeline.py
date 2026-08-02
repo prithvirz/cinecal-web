@@ -147,9 +147,9 @@ def send_telegram_photo(bot_token, chat_id, photo_url, caption):
         print(f"Failed to send photo: {e}", file=sys.stderr)
         return False
 
-def format_movie_line(m, include_poster=False):
+def format_movie_line(m):
     title = m.get("title") or m.get("name") or "Unknown"
-    orig = m.get("original_title") or m.get("original_name") or ""
+    orig = m.get("original_title") or ""
     rating = star_rating(m.get("vote_average"))
     pop_tier = popularity_tier(m.get("popularity"))
     genres = ", ".join(get_genre_names(m.get("genre_ids", [])))
@@ -162,10 +162,9 @@ def format_movie_line(m, include_poster=False):
         line += f" | {genres}"
     if lang:
         line += f" | [{lang}]"
-    if include_poster:
-        purl = poster_url(m.get("poster_path"), "w185")
-        if purl:
-            line += f"\n  🖼 [Poster]({purl})"
+    purl = poster_url(m.get("poster_path"), "w185")
+    if purl:
+        line += f"\n  🖼 [Poster]({purl})"
     if m.get("overview"):
         snippet = m["overview"][:120].replace("\n", " ").strip()
         if len(m["overview"]) > 120:
@@ -211,7 +210,7 @@ def build_tldr(movies, tv_shows, market, fallback):
         for m in movies:
             grp = get_language_group(m.get("original_language"))
             lang_counts[grp] = lang_counts.get(grp, 0) + 1
-        counts_str = ", ".join(f"{v} {k}" for k, v in lang_counts.items())
+        counts_str = ", ".join(f"{len(v)} {k}" for k, v in lang_counts.items())
         parts.append(f"🎬 {len(movies)} theatrical ({counts_str})")
     if tv_shows:
         parts.append(f"📺 {len(tv_shows)} OTT drops")
@@ -232,8 +231,6 @@ def build_formatted_briefing(payload):
     fallback_date = payload.get("friday_fallback_date")
 
     lines = [f"🍿 *CineCal — {date_str}*\n"]
-
-    # TL;DR
     lines.append(build_tldr(movies, tv_shows, market, fallback))
     lines.append("")
 
@@ -259,8 +256,8 @@ def build_formatted_briefing(payload):
     else:
         lines.append("_No Indian OTT/streaming releases today._")
 
-    # International — filtered: min popularity 30 or vote_count >= 10
-    filtered_market = [m for m in market if (m.get("popularity", 0) or 0) >= 30 or (m.get("vote_count", 0) or 0) >= 10]
+    # International — filtered by popularity ≥ 20 or vote_count ≥ 10
+    filtered_market = [m for m in market if (m.get("popularity", 0) or 0) >= 20 or (m.get("vote_count", 0) or 0) >= 10]
     lines.append(f"\n🌐 *International Releases in India* ({len(filtered_market)} of {len(market)} shown)")
     if filtered_market:
         filtered_market.sort(key=lambda x: x.get("popularity", 0) or 0, reverse=True)
@@ -280,7 +277,7 @@ def build_formatted_briefing(payload):
                 grp = get_language_group(m.get("original_language"))
                 by_group.setdefault(grp, []).append(m)
             total_fri = len(fallback)
-            counts = ", ".join(f"{v} {k}" for k, v in sorted(by_group.items()))
+            counts = ", ".join(f"{len(v)} {k}" for k, v in sorted(by_group.items()))
             lines.append(f"_{total_fri} releases: {counts}_\n")
             for grp, items in sorted(by_group.items()):
                 for m in items:
@@ -314,50 +311,46 @@ def run_pipeline():
     fallback_date_str = None
 
     if api_key:
-        # Indian theatrical — wider window: today ± 1 day
         prev_date = (today_date - timedelta(days=1)).strftime('%Y-%m-%d')
         next_date = (today_date + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        # Indian theatrical — no region filter, language filter is enough; no vote_count filter (upcoming = 0 votes)
         m_res = tmdb_request("discover/movie", {
-            "region": "IN",
             "with_original_language": lang_str,
             "primary_release_date.gte": prev_date,
             "primary_release_date.lte": next_date,
-            "sort_by": "popularity.desc",
-            "vote_count.gte": 5
+            "sort_by": "popularity.desc"
         }, api_key)
         exact_movies = [m for m in m_res.get("results", []) if m.get("release_date") == str_date]
 
-        # Indian OTT — wider window
+        # Indian OTT — same approach
         t_res = tmdb_request("discover/tv", {
             "with_original_language": lang_str,
             "first_air_date.gte": prev_date,
             "first_air_date.lte": next_date,
-            "sort_by": "popularity.desc",
-            "vote_count.gte": 3
+            "sort_by": "popularity.desc"
         }, api_key)
         exact_tv = [t for t in t_res.get("results", []) if t.get("first_air_date") == str_date and "IN" in t.get("origin_country", [])]
 
-        # International in India — filter harder
+        # International in India — keep vote_count filter to reduce noise
         market_res = tmdb_request("discover/movie", {
             "region": "IN",
             "primary_release_date.gte": prev_date,
             "primary_release_date.lte": next_date,
             "sort_by": "popularity.desc",
-            "vote_count.gte": 15
+            "vote_count.gte": 10
         }, api_key)
         exact_market = [m for m in market_res.get("results", []) if m.get("release_date") == str_date and m.get("original_language") not in INDIAN_LANGUAGES]
 
-        # Friday fallback — only if today is thin
+        # Friday fallback
         if len(exact_movies) <= 1:
             next_fri = calculate_next_friday(today_date)
             fallback_date_str = next_fri.strftime('%Y-%m-%d')
             fri_res = tmdb_request("discover/movie", {
-                "region": "IN",
                 "with_original_language": lang_str,
                 "primary_release_date.gte": fallback_date_str,
                 "primary_release_date.lte": fallback_date_str,
-                "sort_by": "popularity.desc",
-                "vote_count.gte": 3
+                "sort_by": "popularity.desc"
             }, api_key)
             fallback_data = [m for m in fri_res.get("results", []) if m.get("release_date") == fallback_date_str]
 
@@ -419,7 +412,7 @@ def run_pipeline():
         print("[DECISION] BRIEFING")
         if bot_token and chat_id:
             send_telegram_message(bot_token, chat_id, md_content)
-            # Send top poster as photo for visual punch
+            # Send top poster
             top_poster = None
             for src in [exact_movies, fallback_data]:
                 for m in src:
